@@ -1,0 +1,12 @@
+[package]
+name = "misccli"
+authors = ["Travis Brown <travisrobertbrown@gmail.com>"]
+repository = "https://github.com/travisbrown/misccli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "3", features = ["derive"] }
+csv="1"
+log = "0.4"
+simplelog = "0.11"
