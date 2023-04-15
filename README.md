@@ -1,6 +1,6 @@
 # Miscellaneous command-line tools
 
-[![Rust build status](https://img.shields.io/github/workflow/status/travisbrown/misccli/rust-ci.svg?label=rust)](https://github.com/travisbrown/misccli/actions)
+[![Rust build status](https://img.shields.io/github/actions/workflow/status/travisbrown/misccli/ci.yaml)](https://github.com/travisbrown/misccli/actions)
 [![Coverage status](https://img.shields.io/codecov/c/github/travisbrown/misccli/main.svg)](https://codecov.io/github/travisbrown/misccli)
 
 Please note that this software is **not** "open source",
