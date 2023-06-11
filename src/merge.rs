@@ -21,7 +21,7 @@ pub fn merge<
     Merge::new(left.into_iter(), right.into_iter())
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Side {
     Left,
     Right,
