@@ -12,7 +12,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for line in misccli::merge::merge_lines(reader_a.lines(), reader_b.lines()) {
         let line = line??;
 
-        println!("{}", line);
+        println!("{line}");
     }
 
     /*let mut index_a = 0;

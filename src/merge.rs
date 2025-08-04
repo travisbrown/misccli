@@ -111,7 +111,7 @@ impl<T: Ord, E, IL: Iterator<Item = Result<T, E>>, IR: Iterator<Item = Result<T,
     }
 
     fn read_l(&mut self) -> Result<Option<T>, E> {
-        match self.iter_l.as_mut().and_then(|iter| iter.next().take()) {
+        match self.iter_l.as_mut().and_then(|iter| iter.next()) {
             Some(Ok(value)) => {
                 self.index_l += 1;
                 Ok(Some(value))
@@ -129,7 +129,7 @@ impl<T: Ord, E, IL: Iterator<Item = Result<T, E>>, IR: Iterator<Item = Result<T,
     }
 
     fn read_r(&mut self) -> Result<Option<T>, E> {
-        match self.iter_r.as_mut().and_then(|iter| iter.next().take()) {
+        match self.iter_r.as_mut().and_then(|iter| iter.next()) {
             Some(Ok(value)) => {
                 self.index_r += 1;
                 Ok(Some(value))
