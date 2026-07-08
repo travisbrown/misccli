@@ -6,67 +6,76 @@ use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opts: Opts = Opts::parse();
-    let _ = misccli::log::init(opts.verbose);
+    let _ = misccli::logging::init(opts.verbose);
 
     let ids = BufReader::new(File::open(opts.ids)?)
         .lines()
-        .collect::<Result<HashSet<_>, _>>()
-        .expect("Error reading IDs");
+        .collect::<Result<HashSet<_>, _>>()?;
 
     log::info!("Read {} IDs", ids.len());
 
-    let delimiter: u8 = opts.delimiter.try_into().expect("Invalid delimiter");
+    let delimiter: u8 = opts
+        .delimiter
+        .try_into()
+        .map_err(|_| format!("delimiter is not a single byte: {}", opts.delimiter))?;
 
     let mut data = csv::ReaderBuilder::new()
         .delimiter(delimiter)
         .has_headers(opts.headers)
         .flexible(true)
-        .from_path(opts.data)
-        .expect("Error opening data file");
+        .from_path(opts.data)?;
 
     let mut output = csv::WriterBuilder::new()
-        .has_headers(opts.headers)
         .flexible(true)
         .from_writer(std::io::stdout());
 
     if opts.headers {
-        output
-            .write_record(data.headers().expect("Invalid data file headers"))
-            .expect("Error writing output");
+        output.write_record(data.headers()?)?;
     }
 
     for row in data.into_records() {
-        let row = row.expect("Error reading data file");
-        let id_value = row.get(opts.column).expect("Invalid record");
+        let row = row?;
+        // Rows may legitimately vary in length (the reader is flexible), but
+        // every row must at least reach the ID column.
+        let id_value = row.get(opts.column).ok_or_else(|| {
+            format!(
+                "line {} has no column {}",
+                row.position().map_or(0, |position| position.line()),
+                opts.column
+            )
+        })?;
 
         if opts.exclude != ids.contains(id_value) {
-            output.write_record(&row).expect("Error writing output");
+            output.write_record(&row)?;
         }
     }
 
-    output.flush().expect("Error writing output");
+    output.flush()?;
 
     Ok(())
 }
 
-/// Merge two sorted files, removing duplicates
+/// Filter the rows of a delimited file by matching a column against a set of IDs
 #[derive(Parser)]
 #[clap(name = "filter", about, version, author)]
 struct Opts {
     /// Level of verbosity
     #[clap(short, long, global = true, action = clap::ArgAction::Count)]
     verbose: u8,
-    /// By default the filter includes lines where the ID is in the ID file.
+    /// Exclude rows whose ID is in the ID file instead of including them
     #[clap(long)]
     exclude: bool,
-    #[clap(long)]
-    ids: PathBuf,
-    #[clap(long)]
-    data: PathBuf,
+    /// Zero-based index of the ID column in the data file
     #[clap(long, default_value = "0")]
     column: usize,
+    /// Field delimiter for the data file
     #[clap(short, long, default_value = ",")]
     delimiter: char,
-    #[clap(short)]
+    /// Treat the first row of the data file as a header
+    #[clap(long)]
     headers: bool,
+    /// File containing one ID per line
+    ids: PathBuf,
+    /// Delimited data file to filter
+    data: PathBuf,
 }

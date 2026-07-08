@@ -1,2 +1,2 @@
-pub mod log;
+pub mod logging;
 pub mod merge;

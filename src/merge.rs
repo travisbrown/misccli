@@ -29,12 +29,20 @@ pub enum Side {
 
 impl Display for Side {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", if *self == Side::Left { "left" } else { "right" })
+        f.write_str(match self {
+            Self::Left => "left",
+            Self::Right => "right",
+        })
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub enum MergeError<T> {
+    #[error(
+        "unsorted pair in the {side} file at lines {} and {}: {first:?}, {second:?}",
+        .index + 1,
+        .index + 2
+    )]
     UnsortedPair {
         side: Side,
         index: usize,
@@ -54,185 +62,148 @@ impl<T> MergeError<T> {
     }
 }
 
-impl<T: Debug> Display for MergeError<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnsortedPair {
-                side,
-                index,
-                first,
-                second,
-            } => {
-                write!(
-                    f,
-                    "unsorted pair in the {} file at lines {} and {}: {:?}, {:?}",
-                    side,
-                    index + 1,
-                    index + 2,
-                    first,
-                    second
-                )
+type NestedResult<T, E, A> = Result<Result<A, E>, MergeError<T>>;
+
+/// The state of one input: its iterator, position, current value, and the
+/// first value read past the current one (which becomes current on advance).
+struct SideState<T, I> {
+    side: Side,
+    iter: Option<I>,
+    index: usize,
+    last: Option<T>,
+    pending: Option<T>,
+}
+
+impl<T: Ord, E, I: Iterator<Item = Result<T, E>>> SideState<T, I> {
+    fn new(side: Side, iter: I) -> Self {
+        Self {
+            side,
+            iter: Some(iter),
+            index: 0,
+            last: None,
+            pending: None,
+        }
+    }
+
+    fn read(&mut self) -> Result<Option<T>, E> {
+        match self.iter.as_mut().and_then(Iterator::next) {
+            Some(Ok(value)) => {
+                self.index += 1;
+                Ok(Some(value))
+            }
+            Some(Err(error)) => {
+                self.iter = None;
+                Err(error)
+            }
+            None => {
+                self.iter = None;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Read past duplicates of `last`, returning it with the next distinct
+    /// value (or `None` at the end of the input), and failing if a smaller
+    /// value shows the input is unsorted.
+    fn read_next(&mut self, last: T) -> NestedResult<T, E, (T, Option<T>)> {
+        loop {
+            match self.read() {
+                Ok(Some(value)) => match last.cmp(&value) {
+                    Ordering::Less => {
+                        return Ok(Ok((last, Some(value))));
+                    }
+                    Ordering::Equal => {}
+                    Ordering::Greater => {
+                        return Err(MergeError::unsorted_pair(
+                            self.side,
+                            self.index - 2,
+                            last,
+                            value,
+                        ));
+                    }
+                },
+                Ok(None) => {
+                    return Ok(Ok((last, None)));
+                }
+                Err(error) => {
+                    return Ok(Err(error));
+                }
+            }
+        }
+    }
+
+    /// Make `seed` the current value and read ahead to the next distinct one.
+    fn refill(&mut self, seed: T) -> NestedResult<T, E, ()> {
+        // The `?` propagates the `MergeError` layer; the read error layer is
+        // handled explicitly.
+        match self.read_next(seed)? {
+            Ok((last, pending)) => {
+                self.last = Some(last);
+                self.pending = pending;
+                Ok(Ok(()))
+            }
+            Err(error) => Ok(Err(error)),
+        }
+    }
+
+    fn start(&mut self) -> NestedResult<T, E, ()> {
+        match self.read() {
+            Ok(Some(value)) => self.refill(value),
+            Ok(None) => Ok(Ok(())),
+            Err(error) => Ok(Err(error)),
+        }
+    }
+
+    fn advance(&mut self) -> NestedResult<T, E, ()> {
+        match self.pending.take() {
+            Some(pending) => self.refill(pending),
+            None => {
+                self.last = None;
+                Ok(Ok(()))
             }
         }
     }
 }
 
-impl<T: Debug> std::error::Error for MergeError<T> {}
-
 pub struct Merge<T, IL, IR> {
-    iter_l: Option<IL>,
-    iter_r: Option<IR>,
-    index_l: usize,
-    index_r: usize,
-    last_l: Option<T>,
-    last_r: Option<T>,
-    pending_l: Option<T>,
-    pending_r: Option<T>,
+    left: SideState<T, IL>,
+    right: SideState<T, IR>,
     started: bool,
 }
-
-type NestedResult<T, E, A> = Result<Result<A, E>, MergeError<T>>;
 
 impl<T: Ord, E, IL: Iterator<Item = Result<T, E>>, IR: Iterator<Item = Result<T, E>>>
     Merge<T, IL, IR>
 {
     fn new(left: IL, right: IR) -> Self {
         Self {
-            iter_l: Some(left),
-            iter_r: Some(right),
-            index_l: 0,
-            index_r: 0,
-            last_l: None,
-            last_r: None,
-            pending_l: None,
-            pending_r: None,
+            left: SideState::new(Side::Left, left),
+            right: SideState::new(Side::Right, right),
             started: false,
         }
     }
 
-    fn read_l(&mut self) -> Result<Option<T>, E> {
-        match self.iter_l.as_mut().and_then(|iter| iter.next()) {
-            Some(Ok(value)) => {
-                self.index_l += 1;
-                Ok(Some(value))
-            }
-            Some(Err(error)) => {
-                self.iter_l = None;
-                self.iter_r = None;
-                Err(error)
-            }
-            None => {
-                self.iter_l = None;
-                Ok(None)
-            }
-        }
+    /// Drop both iterators after a read error so no further input is pulled.
+    fn halt(&mut self) {
+        self.left.iter = None;
+        self.right.iter = None;
     }
+}
 
-    fn read_r(&mut self) -> Result<Option<T>, E> {
-        match self.iter_r.as_mut().and_then(|iter| iter.next()) {
-            Some(Ok(value)) => {
-                self.index_r += 1;
-                Ok(Some(value))
+/// Run a side operation inside `next`, converting the two error layers of its
+/// `NestedResult` into early returns of the corresponding iterator items.
+macro_rules! try_side {
+    ($self:ident, $side:ident, $method:ident) => {
+        match $self.$side.$method() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                $self.halt();
+                return Some(Ok(Err(error)));
             }
-            Some(Err(error)) => {
-                self.iter_l = None;
-                self.iter_r = None;
-                Err(error)
-            }
-            None => {
-                self.iter_r = None;
-                Ok(None)
+            Err(error) => {
+                return Some(Err(error));
             }
         }
-    }
-
-    fn read_next_l(&mut self, last: T) -> NestedResult<T, E, (T, Option<T>)> {
-        loop {
-            match self.read_l() {
-                Ok(Some(value)) => match last.cmp(&value) {
-                    Ordering::Less => {
-                        return Ok(Ok((last, Some(value))));
-                    }
-                    Ordering::Equal => {}
-                    Ordering::Greater => {
-                        return Err(MergeError::unsorted_pair(
-                            Side::Left,
-                            self.index_l - 2,
-                            last,
-                            value,
-                        ));
-                    }
-                },
-                Ok(None) => {
-                    return Ok(Ok((last, None)));
-                }
-                Err(error) => {
-                    return Ok(Err(error));
-                }
-            }
-        }
-    }
-
-    fn read_next_r(&mut self, last: T) -> NestedResult<T, E, (T, Option<T>)> {
-        loop {
-            match self.read_r() {
-                Ok(Some(value)) => match last.cmp(&value) {
-                    Ordering::Less => {
-                        return Ok(Ok((last, Some(value))));
-                    }
-                    Ordering::Equal => {}
-                    Ordering::Greater => {
-                        return Err(MergeError::unsorted_pair(
-                            Side::Right,
-                            self.index_r - 2,
-                            last,
-                            value,
-                        ));
-                    }
-                },
-                Ok(None) => {
-                    return Ok(Ok((last, None)));
-                }
-                Err(error) => {
-                    return Ok(Err(error));
-                }
-            }
-        }
-    }
-
-    fn advance_l(&mut self) -> Result<Result<(), E>, MergeError<T>> {
-        if let Some(pending) = self.pending_l.take() {
-            match self.read_next_l(pending) {
-                Ok(Ok((new_last, new_pending))) => {
-                    self.last_l = Some(new_last);
-                    self.pending_l = new_pending;
-                    Ok(Ok(()))
-                }
-                Ok(Err(error)) => Ok(Err(error)),
-                Err(error) => Err(error),
-            }
-        } else {
-            self.last_l = None;
-            Ok(Ok(()))
-        }
-    }
-
-    fn advance_r(&mut self) -> Result<Result<(), E>, MergeError<T>> {
-        if let Some(pending) = self.pending_r.take() {
-            match self.read_next_r(pending) {
-                Ok(Ok((new_last, new_pending))) => {
-                    self.last_r = Some(new_last);
-                    self.pending_r = new_pending;
-                    Ok(Ok(()))
-                }
-                Ok(Err(error)) => Ok(Err(error)),
-                Err(error) => Err(error),
-            }
-        } else {
-            self.last_r = None;
-            Ok(Ok(()))
-        }
-    }
+    };
 }
 
 impl<T: Ord, E, IL: Iterator<Item = Result<T, E>>, IR: Iterator<Item = Result<T, E>>> Iterator
@@ -243,121 +214,35 @@ impl<T: Ord, E, IL: Iterator<Item = Result<T, E>>, IR: Iterator<Item = Result<T,
     fn next(&mut self) -> Option<Self::Item> {
         if !self.started {
             self.started = true;
-
-            match self.read_l() {
-                Ok(Some(value)) => match self.read_next_l(value) {
-                    Ok(Ok((last, pending))) => {
-                        self.last_l = Some(last);
-                        self.pending_l = pending;
-                    }
-                    Ok(Err(error)) => {
-                        return Some(Ok(Err(error)));
-                    }
-                    Err(error) => {
-                        return Some(Err(error));
-                    }
-                },
-                Ok(None) => {}
-                Err(error) => {
-                    return Some(Ok(Err(error)));
-                }
-            }
-
-            match self.read_r() {
-                Ok(Some(value)) => match self.read_next_r(value) {
-                    Ok(Ok((last, pending))) => {
-                        self.last_r = Some(last);
-                        self.pending_r = pending;
-                    }
-                    Ok(Err(error)) => {
-                        return Some(Ok(Err(error)));
-                    }
-                    Err(error) => {
-                        return Some(Err(error));
-                    }
-                },
-                Ok(None) => {}
-                Err(error) => {
-                    return Some(Ok(Err(error)));
-                }
-            }
+            try_side!(self, left, start);
+            try_side!(self, right, start);
         }
 
-        match (self.last_l.take(), self.last_r.take()) {
-            (Some(last_l), Some(last_r)) => match last_l.cmp(&last_r) {
+        match (self.left.last.take(), self.right.last.take()) {
+            (Some(left), Some(right)) => match left.cmp(&right) {
                 Ordering::Less => {
-                    match self.advance_l() {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => {
-                            return Some(Ok(Err(error)));
-                        }
-                        Err(error) => {
-                            return Some(Err(error));
-                        }
-                    }
-                    self.last_r = Some(last_r);
-                    Some(Ok(Ok(last_l)))
+                    try_side!(self, left, advance);
+                    self.right.last = Some(right);
+                    Some(Ok(Ok(left)))
                 }
                 Ordering::Greater => {
-                    match self.advance_r() {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => {
-                            return Some(Ok(Err(error)));
-                        }
-                        Err(error) => {
-                            return Some(Err(error));
-                        }
-                    }
-                    self.last_l = Some(last_l);
-                    Some(Ok(Ok(last_r)))
+                    try_side!(self, right, advance);
+                    self.left.last = Some(left);
+                    Some(Ok(Ok(right)))
                 }
                 Ordering::Equal => {
-                    match self.advance_l() {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => {
-                            return Some(Ok(Err(error)));
-                        }
-                        Err(error) => {
-                            return Some(Err(error));
-                        }
-                    }
-                    match self.advance_r() {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => {
-                            return Some(Ok(Err(error)));
-                        }
-                        Err(error) => {
-                            return Some(Err(error));
-                        }
-                    }
-                    Some(Ok(Ok(last_l)))
+                    try_side!(self, left, advance);
+                    try_side!(self, right, advance);
+                    Some(Ok(Ok(left)))
                 }
             },
-            (Some(last), None) => {
-                match self.advance_l() {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        return Some(Ok(Err(error)));
-                    }
-                    Err(error) => {
-                        return Some(Err(error));
-                    }
-                }
-
-                Some(Ok(Ok(last)))
+            (Some(value), None) => {
+                try_side!(self, left, advance);
+                Some(Ok(Ok(value)))
             }
-            (None, Some(last)) => {
-                match self.advance_r() {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        return Some(Ok(Err(error)));
-                    }
-                    Err(error) => {
-                        return Some(Err(error));
-                    }
-                }
-
-                Some(Ok(Ok(last)))
+            (None, Some(value)) => {
+                try_side!(self, right, advance);
+                Some(Ok(Ok(value)))
             }
             (None, None) => None,
         }
@@ -367,6 +252,7 @@ impl<T: Ord, E, IL: Iterator<Item = Result<T, E>>, IR: Iterator<Item = Result<T,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     #[test]
     fn merge_pure() {
@@ -407,5 +293,28 @@ mod tests {
         ];
 
         assert_eq!(merged, expected);
+    }
+
+    #[test]
+    fn merge_lines_readers() {
+        let left = Cursor::new("apple\nbanana\ncherry\n");
+        let right = Cursor::new("banana\ndate\n");
+
+        let merged = merge_lines(left.lines(), right.lines())
+            .map(|line| line.unwrap().unwrap())
+            .collect::<Vec<String>>();
+        let expected = vec!["apple", "banana", "cherry", "date"];
+
+        assert_eq!(merged, expected);
+    }
+
+    #[test]
+    fn merge_error_display() {
+        let error = MergeError::unsorted_pair(Side::Right, 2, 17, 8);
+
+        assert_eq!(
+            error.to_string(),
+            "unsorted pair in the right file at lines 3 and 4: 17, 8"
+        );
     }
 }
