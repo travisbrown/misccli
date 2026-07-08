@@ -9,4 +9,6 @@ edition = "2024"
 clap = { version = "4", features = ["derive"] }
 csv="1"
 log = "0.4"
+md5 = "0.8"
 simplelog = "0.12"
+zstd = "0.13"
