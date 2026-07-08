@@ -13,6 +13,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect::<Result<HashSet<_>, _>>()
         .expect("Error reading IDs");
 
+    log::info!("Read {} IDs", ids.len());
+
     let delimiter: u8 = opts.delimiter.try_into().expect("Invalid delimiter");
 
     let mut data = csv::ReaderBuilder::new()
